@@ -65,14 +65,18 @@ class MapsClient:
                 if not result:
                     # API responded but found no route → definitively unreachable.
                     return lat, lng, "", False
-                # The Directions API snaps origin to nearest road automatically;
-                # grab that snapped location from the first leg.
                 leg = result[0]["legs"][0]
-                snapped_loc = leg["start_location"]
+                # leg["start_location"] is only the projected origin — it can still
+                # land on a walking path.  leg["steps"][0]["start_location"] is the
+                # first point of the actual *driving* maneuver, guaranteed to be on
+                # a car-navigable road segment.
+                steps = leg.get("steps", [])
+                if steps:
+                    snapped_loc = steps[0]["start_location"]
+                else:
+                    snapped_loc = leg["start_location"]
                 s_lat = float(snapped_loc["lat"])
                 s_lng = float(snapped_loc["lng"])
-                # Best available address hint: end of first step description or
-                # start_address of the leg.
                 addr = leg.get("start_address", f"{s_lat:.6f},{s_lng:.6f}")
                 return s_lat, s_lng, addr, True
             except Exception:
