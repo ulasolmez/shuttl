@@ -105,9 +105,12 @@ class ShuttleOptimizer:
         routing = pywrapcp.RoutingModel(manager)
 
         # --- Arc cost (distance) callback ---
+        # Depot→stop arcs are free (one-way pickup routing: stops→hub only).
         def distance_callback(from_index: int, to_index: int) -> int:
             from_node = manager.IndexToNode(from_index)
             to_node = manager.IndexToNode(to_index)
+            if from_node == 0:
+                return 0
             return self._matrix[from_node][to_node]
 
         transit_cb_idx = routing.RegisterTransitCallback(distance_callback)
@@ -173,22 +176,33 @@ class ShuttleOptimizer:
 
             stop_indices: list[int] = []
             stop_names: list[str] = []
-            route_dist = 0
             route_passengers = 0
+            # Skip the leading depot node — route is displayed as stops → hub.
+            first = True
 
             while not routing.IsEnd(index):
                 node = manager.IndexToNode(index)
-                stop_indices.append(node)
-                stop_names.append(self._stop_names[node])
-                route_passengers += self._demands[node]
+                if not (first and node == 0):
+                    stop_indices.append(node)
+                    stop_names.append(self._stop_names[node])
+                    route_passengers += self._demands[node]
+                first = False
+                index = solution.Value(routing.NextVar(index))
 
-                next_index = solution.Value(routing.NextVar(index))
-                route_dist += routing.GetArcCostForVehicle(index, next_index, vehicle_id)
-                index = next_index
-
-            # Append depot at end to close the route.
+            # Append hub at end to close the inbound route.
             stop_indices.append(manager.IndexToNode(index))
             stop_names.append(self._stop_names[manager.IndexToNode(index)])
+
+            # Distance: sum real arcs only (stop→stop and last_stop→hub).
+            # Re-walk the OR-Tools solution to pick up inbound arc costs.
+            route_dist = 0
+            idx = routing.Start(vehicle_id)
+            idx = solution.Value(routing.NextVar(idx))  # skip depot→first_stop
+            while not routing.IsEnd(idx):
+                nxt = solution.Value(routing.NextVar(idx))
+                route_dist += self._matrix[
+                    manager.IndexToNode(idx)][manager.IndexToNode(nxt)]
+                idx = nxt
 
             total_dist += route_dist
             occ_pct = round(route_passengers / self._vehicle_capacity * 100, 1)
