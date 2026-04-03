@@ -30,6 +30,50 @@ class MapsClient:
         loc = results[0]["geometry"]["location"]
         return float(loc["lat"]), float(loc["lng"])
 
+    def snap_to_road(self, lat: float, lng: float) -> tuple[float, float, str]:
+        """
+        Return the nearest road-accessible coordinate for the given point.
+
+        Strategy
+        --------
+        1. Try the Roads API ``snapToRoads`` endpoint (most accurate).
+        2. Fall back to reverse geocoding — the returned geometry.location is the
+           centroid of the nearest geocoded feature, which is always routable.
+        3. Return original coordinates unchanged on total failure.
+
+        Returns (snapped_lat, snapped_lng, formatted_address_hint).
+        The address hint is an empty string when unavailable.
+        """
+        # --- Roads API (preferred) ---
+        try:
+            results = self._client.snap_to_roads([(lat, lng)], interpolate=False)
+            if results:
+                loc = results[0]["location"]
+                snapped = (float(loc["latitude"]), float(loc["longitude"]))
+                # Fetch a human-readable address for the snapped point.
+                addr = ""
+                try:
+                    rg = self._client.reverse_geocode(snapped)
+                    if rg:
+                        addr = rg[0].get("formatted_address", "")
+                except Exception:
+                    pass
+                return snapped[0], snapped[1], addr
+        except Exception:
+            pass
+
+        # --- Fallback: reverse geocode ---
+        try:
+            rg = self._client.reverse_geocode((lat, lng))
+            if rg:
+                loc = rg[0]["geometry"]["location"]
+                addr = rg[0].get("formatted_address", "")
+                return float(loc["lat"]), float(loc["lng"]), addr
+        except Exception:
+            pass
+
+        return lat, lng, ""
+
     # ------------------------------------------------------------------
     # Distance matrix
     # ------------------------------------------------------------------

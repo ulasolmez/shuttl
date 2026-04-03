@@ -50,6 +50,7 @@ def _init_state():
         "_last_click_coords": None, # dedup guard: last processed (lat, lng) tuple
         "occupation_types": ["Worker", "Technician", "Cleaner"],
         "occ_optimize": False,      # group same occupations onto same shuttle when possible
+        "snap_notice": None,        # name of last stop that was auto-snapped to road
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -259,6 +260,25 @@ def _run_optimization(num_vehicles: int, vehicle_capacity: int, max_distance_km:
             st.error(f"Distance matrix request failed: {exc}")
             return
 
+    # Detect stops that are completely unreachable (all matrix arcs are penalty).
+    _PENALTY = 999_999_999
+    _unreachable = [
+        stops[_si]["name"]
+        for _si in range(len(stops))
+        if all(
+            dist_matrix[_si + 1][_j] >= _PENALTY
+            for _j in range(len(dist_matrix))
+            if _j != _si + 1
+        )
+    ]
+    if _unreachable:
+        _names = ", ".join(f"**{n}**" for n in _unreachable)
+        st.error(
+            f"The following stop(s) are not reachable by road: {_names}. "
+            "Remove them or re-add them by clicking on a nearby road."
+        )
+        return
+
     # Occupation-aware routing: penalise arcs between stops of different primary types.
     # Penalty per mixed edge < fixed vehicle cost → solver prefers grouping but won't
     # open an extra shuttle just to keep occupations separate.
@@ -420,6 +440,7 @@ with st.sidebar:
                 "stops": [], "destination": None,
                 "result": None, "route_polylines": None,
                 "pending_click": None, "_last_click_coords": None,
+                "snap_notice": None,
             })
             st.rerun()
 
@@ -479,11 +500,19 @@ if pc:
             c1, c2 = st.columns(2)
             with c1:
                 if st.form_submit_button("✅ Set as Hub", use_container_width=True):
+                    _h_lat, _h_lng, _h_addr = pc["lat"], pc["lng"], f"{lat_str},{lng_str}"
+                    try:
+                        _mc = _maps_client()
+                        _h_lat, _h_lng, _h_addr_snap = _mc.snap_to_road(pc["lat"], pc["lng"])
+                        if _h_addr_snap:
+                            _h_addr = _h_addr_snap
+                    except Exception:
+                        pass
                     st.session_state["destination"] = {
                         "name": hub_name.strip() or "Hub",
-                        "address": f"{lat_str},{lng_str}",
-                        "lat": pc["lat"],
-                        "lng": pc["lng"],
+                        "address": _h_addr,
+                        "lat": _h_lat,
+                        "lng": _h_lng,
                     }
                     # Moving hub invalidates previous optimisation result.
                     st.session_state["result"] = None
@@ -522,16 +551,33 @@ if pc:
                     else:
                         _occ_total = sum(_occ_vals.values())
                         passengers = _occ_total if _occ_total > 0 else int(stop_pax)
+                        # Snap clicked coordinates to the nearest driveable road.
+                        _s_lat, _s_lng, _s_addr = pc["lat"], pc["lng"], f"{lat_str},{lng_str}"
+                        _snapped = False
+                        try:
+                            _mc = _maps_client()
+                            _s_lat, _s_lng, _s_addr_snap = _mc.snap_to_road(pc["lat"], pc["lng"])
+                            if _s_addr_snap:
+                                _s_addr = _s_addr_snap
+                            _dist_m = (((_s_lat - pc["lat"]) * 111_000) ** 2
+                                       + ((_s_lng - pc["lng"]) * 111_000) ** 2) ** 0.5
+                            _snapped = _dist_m > 5  # only flag if moved > 5 m
+                        except Exception:
+                            pass
                         _new_stop: dict = {
                             "name": stop_name.strip(),
-                            "address": f"{lat_str},{lng_str}",
-                            "lat": pc["lat"],
-                            "lng": pc["lng"],
+                            "address": _s_addr,
+                            "lat": _s_lat,
+                            "lng": _s_lng,
                             "passengers": passengers,
                         }
                         if _occ_total > 0:
                             _new_stop["occupations"] = {k: v for k, v in _occ_vals.items() if v > 0}
+                        if _snapped:
+                            _new_stop["snapped"] = True
                         st.session_state["stops"].append(_new_stop)
+                        if _snapped:
+                            st.session_state["snap_notice"] = stop_name.strip()
                         # Invalidate previous result when graph changes.
                         st.session_state["result"] = None
                         st.session_state["route_polylines"] = None
@@ -543,6 +589,14 @@ if pc:
                     st.rerun()
 
 st.divider()
+
+# Show snap notice once after a stop is snapped to road.
+if st.session_state.get("snap_notice"):
+    st.info(
+        f"📌 '{st.session_state['snap_notice']}' was moved to the nearest "
+        "driveable road automatically."
+    )
+    st.session_state["snap_notice"] = None
 
 # ---------------------------------------------------------------------------
 # Stop list + CSV import (collapsible)
