@@ -30,49 +30,66 @@ class MapsClient:
         loc = results[0]["geometry"]["location"]
         return float(loc["lat"]), float(loc["lng"])
 
-    def snap_to_road(self, lat: float, lng: float) -> tuple[float, float, str]:
+    def snap_to_road(
+        self,
+        lat: float,
+        lng: float,
+        ref_lat: float | None = None,
+        ref_lng: float | None = None,
+    ) -> tuple[float, float, str, bool]:
         """
-        Return the nearest road-accessible coordinate for the given point.
+        Snap a clicked coordinate to the nearest driveable road.
 
-        Strategy
-        --------
-        1. Try the Roads API ``snapToRoads`` endpoint (most accurate).
-        2. Fall back to reverse geocoding — the returned geometry.location is the
-           centroid of the nearest geocoded feature, which is always routable.
-        3. Return original coordinates unchanged on total failure.
+        When a reference point (hub) is supplied, the Directions API is used:
+        it auto-snaps origin/destination to the nearest road internally, and
+        returns ZERO_RESULTS when no driving route exists at all.  This is the
+        most reliable method because it uses the same API the optimizer uses.
 
-        Returns (snapped_lat, snapped_lng, formatted_address_hint).
-        The address hint is an empty string when unavailable.
+        Without a reference point, reverse-geocoding is used as a best-effort
+        fallback (doesn't guarantee road access but catches obvious cases like
+        ocean / uninhabited land).
+
+        Returns
+        -------
+        (snapped_lat, snapped_lng, address_hint, reachable)
+        ``reachable`` is False only when we are certain no route exists.
         """
-        # --- Roads API (preferred) ---
-        try:
-            results = self._client.snap_to_roads([(lat, lng)], interpolate=False)
-            if results:
-                loc = results[0]["location"]
-                snapped = (float(loc["latitude"]), float(loc["longitude"]))
-                # Fetch a human-readable address for the snapped point.
-                addr = ""
-                try:
-                    rg = self._client.reverse_geocode(snapped)
-                    if rg:
-                        addr = rg[0].get("formatted_address", "")
-                except Exception:
-                    pass
-                return snapped[0], snapped[1], addr
-        except Exception:
-            pass
+        # --- Directions API (most reliable when hub is known) ---
+        if ref_lat is not None and ref_lng is not None:
+            try:
+                result = self._client.directions(
+                    origin=f"{lat},{lng}",
+                    destination=f"{ref_lat},{ref_lng}",
+                    mode="driving",
+                )
+                if not result:
+                    # API responded but found no route → definitively unreachable.
+                    return lat, lng, "", False
+                # The Directions API snaps origin to nearest road automatically;
+                # grab that snapped location from the first leg.
+                leg = result[0]["legs"][0]
+                snapped_loc = leg["start_location"]
+                s_lat = float(snapped_loc["lat"])
+                s_lng = float(snapped_loc["lng"])
+                # Best available address hint: end of first step description or
+                # start_address of the leg.
+                addr = leg.get("start_address", f"{s_lat:.6f},{s_lng:.6f}")
+                return s_lat, s_lng, addr, True
+            except Exception:
+                # Network / API error — don't block the user.
+                return lat, lng, "", True
 
-        # --- Fallback: reverse geocode ---
+        # --- Fallback: reverse geocode (no hub set yet) ---
         try:
             rg = self._client.reverse_geocode((lat, lng))
             if rg:
                 loc = rg[0]["geometry"]["location"]
                 addr = rg[0].get("formatted_address", "")
-                return float(loc["lat"]), float(loc["lng"]), addr
+                return float(loc["lat"]), float(loc["lng"]), addr, True
         except Exception:
             pass
 
-        return lat, lng, ""
+        return lat, lng, "", True
 
     # ------------------------------------------------------------------
     # Distance matrix

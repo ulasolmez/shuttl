@@ -260,22 +260,19 @@ def _run_optimization(num_vehicles: int, vehicle_capacity: int, max_distance_km:
             st.error(f"Distance matrix request failed: {exc}")
             return
 
-    # Detect stops that are completely unreachable (all matrix arcs are penalty).
+    # Detect stops that cannot reach the hub.  A stop is unreachable when its
+    # arc to node 0 (depot/hub) is the penalty value used for ZERO_RESULTS cells.
     _PENALTY = 999_999_999
     _unreachable = [
         stops[_si]["name"]
         for _si in range(len(stops))
-        if all(
-            dist_matrix[_si + 1][_j] >= _PENALTY
-            for _j in range(len(dist_matrix))
-            if _j != _si + 1
-        )
+        if dist_matrix[_si + 1][0] >= _PENALTY or dist_matrix[0][_si + 1] >= _PENALTY
     ]
     if _unreachable:
         _names = ", ".join(f"**{n}**" for n in _unreachable)
         st.error(
-            f"The following stop(s) are not reachable by road: {_names}. "
-            "Remove them or re-add them by clicking on a nearby road."
+            f"The following stop(s) have no driveable route to the hub: {_names}. "
+            "Remove them and re-add by clicking on a nearby road."
         )
         return
 
@@ -503,7 +500,7 @@ if pc:
                     _h_lat, _h_lng, _h_addr = pc["lat"], pc["lng"], f"{lat_str},{lng_str}"
                     try:
                         _mc = _maps_client()
-                        _h_lat, _h_lng, _h_addr_snap = _mc.snap_to_road(pc["lat"], pc["lng"])
+                        _h_lat, _h_lng, _h_addr_snap, _ = _mc.snap_to_road(pc["lat"], pc["lng"])
                         if _h_addr_snap:
                             _h_addr = _h_addr_snap
                     except Exception:
@@ -551,18 +548,33 @@ if pc:
                     else:
                         _occ_total = sum(_occ_vals.values())
                         passengers = _occ_total if _occ_total > 0 else int(stop_pax)
-                        # Snap clicked coordinates to the nearest driveable road.
-                        _s_lat, _s_lng, _s_addr = pc["lat"], pc["lng"], f"{lat_str},{lng_str}"
+                        # Snap to road via Directions API (uses hub as reference when
+                        # available — same API as optimizer, reliable snap + reachability).
+                        _s_lat, _s_lng = pc["lat"], pc["lng"]
+                        _s_addr = f"{lat_str},{lng_str}"
                         _snapped = False
+                        _hub = st.session_state.get("destination")
                         try:
                             _mc = _maps_client()
-                            _s_lat, _s_lng, _s_addr_snap = _mc.snap_to_road(pc["lat"], pc["lng"])
-                            if _s_addr_snap:
-                                _s_addr = _s_addr_snap
-                            _dist_m = (((_s_lat - pc["lat"]) * 111_000) ** 2
-                                       + ((_s_lng - pc["lng"]) * 111_000) ** 2) ** 0.5
-                            _snapped = _dist_m > 5  # only flag if moved > 5 m
-                        except Exception:
+                            _ref_lat = _hub["lat"] if _hub else None
+                            _ref_lng = _hub["lng"] if _hub else None
+                            _sn_lat, _sn_lng, _sn_addr, _reachable = _mc.snap_to_road(
+                                pc["lat"], pc["lng"], _ref_lat, _ref_lng
+                            )
+                            if not _reachable:
+                                st.error(
+                                    "🚫 This location has no driveable road access. "
+                                    "Please click on or near a road."
+                                )
+                                st.stop()
+                            _dist_m = (((_sn_lat - pc["lat"]) * 111_000) ** 2
+                                       + ((_sn_lng - pc["lng"]) * 111_000) ** 2) ** 0.5
+                            _s_lat, _s_lng = _sn_lat, _sn_lng
+                            if _sn_addr:
+                                _s_addr = _sn_addr
+                            _snapped = _dist_m > 5
+                        except ValueError:
+                            # No API key yet — skip snap but allow add.
                             pass
                         _new_stop: dict = {
                             "name": stop_name.strip(),
