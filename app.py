@@ -260,13 +260,14 @@ def _run_optimization(num_vehicles: int, vehicle_capacity: int, max_distance_km:
             st.error(f"Distance matrix request failed: {exc}")
             return
 
-    # Detect stops that cannot reach the hub.  A stop is unreachable when its
-    # arc to node 0 (depot/hub) is the penalty value used for ZERO_RESULTS cells.
+    # Detect stops that cannot reach the hub.
+    # Only check the stop→hub direction (inbound one-way routing).
+    # hub→stop can legitimately be ZERO_RESULTS for airports/restricted exits.
     _PENALTY = 999_999_999
     _unreachable = [
         stops[_si]["name"]
         for _si in range(len(stops))
-        if dist_matrix[_si + 1][0] >= _PENALTY or dist_matrix[0][_si + 1] >= _PENALTY
+        if dist_matrix[_si + 1][0] >= _PENALTY
     ]
     if _unreachable:
         _names = ", ".join(f"**{n}**" for n in _unreachable)
