@@ -14,6 +14,7 @@ Main     : Interactive Folium map (always visible) → click to add nodes
 from __future__ import annotations
 import os
 import io
+import json
 
 import pandas as pd
 import streamlit as st
@@ -105,6 +106,54 @@ def _stops_dataframe() -> pd.DataFrame:
         for i, s in enumerate(stops)
     ]
     return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# Session save / load (JSON)
+# ---------------------------------------------------------------------------
+
+def _session_to_json() -> bytes:
+    """Serialise stops + hub to JSON bytes for download."""
+    payload = {
+        "version": 1,
+        "destination": st.session_state["destination"],
+        "stops": st.session_state["stops"],
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2).encode()
+
+
+def _load_session_json(raw: bytes) -> str | None:
+    """
+    Deserialise a previously exported session JSON.
+    Returns an error string on failure, None on success.
+    """
+    try:
+        payload = json.loads(raw.decode())
+    except Exception:
+        return "File is not valid JSON."
+
+    if not isinstance(payload, dict) or payload.get("version") != 1:
+        return "Unrecognised file format (expected version 1 session file)."
+
+    dest = payload.get("destination")
+    stops = payload.get("stops", [])
+
+    if dest is not None:
+        required_dest = {"name", "address", "lat", "lng"}
+        if not required_dest.issubset(dest.keys()):
+            return "Destination entry is missing required fields."
+
+    for s in stops:
+        if not {"name", "address", "passengers"}.issubset(s.keys()):
+            return "One or more stop entries are missing required fields."
+
+    st.session_state["destination"] = dest
+    st.session_state["stops"] = stops
+    st.session_state["result"] = None
+    st.session_state["route_polylines"] = None
+    st.session_state["pending_click"] = None
+    st.session_state["_last_click_coords"] = None
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -429,6 +478,33 @@ with st.expander(
     + (" — click to manage" if st.session_state["stops"] else " — none yet"),
     expanded=not st.session_state["stops"],
 ):
+    # Session save / load
+    with st.expander("💾 Save / Load Session"):
+        has_data = bool(st.session_state["stops"]) or bool(st.session_state["destination"])
+        st.caption("Export your stops and hub to a file so you can reload them later.")
+        col_save, col_load = st.columns(2)
+        with col_save:
+            st.download_button(
+                "⬇️ Export session (.json)",
+                data=_session_to_json(),
+                file_name="shuttl_session.json",
+                mime="application/json",
+                disabled=not has_data,
+                use_container_width=True,
+            )
+        with col_load:
+            session_file = st.file_uploader(
+                "Import session (.json)", type=["json"], key="session_upload",
+                label_visibility="collapsed",
+            )
+            if session_file is not None:
+                err = _load_session_json(session_file.read())
+                if err:
+                    st.error(err)
+                else:
+                    st.success("Session loaded!")
+                    st.rerun()
+
     # CSV upload
     with st.expander("⬆️ Import from CSV"):
         st.markdown(
