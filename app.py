@@ -41,13 +41,15 @@ st.set_page_config(
 # ---------------------------------------------------------------------------
 def _init_state():
     defaults = {
-        "stops": [],                # list of {name, address, lat, lng, passengers}
+        "stops": [],                # list of {name, address, lat, lng, passengers, occupations?}
         "destination": None,        # {name, address, lat, lng} | None
         "result": None,             # OptimizationResult | None
         "route_polylines": None,    # {(from_node, to_node): [(lat, lng), …]} | None
         "geo_cache": {},            # address → (lat, lng) cache
         "pending_click": None,      # {lat, lng} awaiting user confirmation
         "_last_click_coords": None, # dedup guard: last processed (lat, lng) tuple
+        "occupation_types": ["Worker", "Technician", "Cleaner"],
+        "occ_optimize": False,      # group same occupations onto same shuttle when possible
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -102,6 +104,9 @@ def _stops_dataframe() -> pd.DataFrame:
             "Lat": round(s["lat"], 6) if s["lat"] is not None else "—",
             "Lng": round(s["lng"], 6) if s["lng"] is not None else "—",
             "Passengers": s["passengers"],
+            "Occupations": ", ".join(
+                f"{k}×{v}" for k, v in s.get("occupations", {}).items() if v > 0
+            ) or "—",
         }
         for i, s in enumerate(stops)
     ]
@@ -118,6 +123,7 @@ def _session_to_json() -> bytes:
         "version": 1,
         "destination": st.session_state["destination"],
         "stops": st.session_state["stops"],
+        "occupation_types": st.session_state["occupation_types"],
     }
     return json.dumps(payload, ensure_ascii=False, indent=2).encode()
 
@@ -149,6 +155,8 @@ def _load_session_json(raw: bytes) -> str | None:
 
     st.session_state["destination"] = dest
     st.session_state["stops"] = stops
+    if "occupation_types" in payload and isinstance(payload["occupation_types"], list):
+        st.session_state["occupation_types"] = payload["occupation_types"]
     st.session_state["result"] = None
     st.session_state["route_polylines"] = None
     st.session_state["pending_click"] = None
@@ -212,7 +220,8 @@ def _parse_csv(raw: bytes) -> list[dict] | None:
 # Optimisation runner
 # ---------------------------------------------------------------------------
 
-def _run_optimization(num_vehicles: int, vehicle_capacity: int, max_distance_km: float):
+def _run_optimization(num_vehicles: int, vehicle_capacity: int, max_distance_km: float,
+                      occ_optimize: bool = False):
     stops = st.session_state["stops"]
     destination = st.session_state["destination"]
 
@@ -249,6 +258,28 @@ def _run_optimization(num_vehicles: int, vehicle_capacity: int, max_distance_km:
         except Exception as exc:
             st.error(f"Distance matrix request failed: {exc}")
             return
+
+    # Occupation-aware routing: penalise arcs between stops of different primary types.
+    # Penalty per mixed edge < fixed vehicle cost → solver prefers grouping but won't
+    # open an extra shuttle just to keep occupations separate.
+    if occ_optimize and any(s.get("occupations") for s in stops):
+        _max_arc = max((max(row) for row in dist_matrix), default=1)
+        _penalty = max(1, _max_arc // max(1, len(stops)))
+
+        def _primary_occ(s: dict) -> str | None:
+            occs = s.get("occupations", {})
+            return max(occs, key=lambda k: occs[k]) if occs else None
+
+        _penalized = [row[:] for row in dist_matrix]
+        for _pi_idx in range(1, len(dist_matrix)):
+            _pi = _primary_occ(stops[_pi_idx - 1])
+            if _pi is None:
+                continue
+            for _pj_idx in range(1, len(dist_matrix)):
+                _pj = _primary_occ(stops[_pj_idx - 1])
+                if _pj is not None and _pi != _pj:
+                    _penalized[_pi_idx][_pj_idx] += _penalty
+        dist_matrix = _penalized
 
     demands = [0] + [s["passengers"] for s in stops]
     stop_names = [destination["name"]] + [s["name"] for s in stops]
@@ -339,11 +370,41 @@ with st.sidebar:
 
     st.divider()
 
+    # Occupation types manager
+    st.subheader("Occupation Types")
+    for _oi, _ot in enumerate(st.session_state["occupation_types"]):
+        _c1, _c2 = st.columns([5, 1])
+        with _c1:
+            st.text(_ot)
+        with _c2:
+            if st.button("✕", key=f"rm_occ_{_oi}", help=f"Remove {_ot}"):
+                st.session_state["occupation_types"].pop(_oi)
+                st.rerun()
+    _nc1, _nc2 = st.columns([3, 1])
+    with _nc1:
+        st.text_input("Add type", key="new_occ_type",
+                      label_visibility="collapsed", placeholder="e.g. Engineer")
+    with _nc2:
+        if st.button("Add", key="add_occ_btn"):
+            _nval = st.session_state.get("new_occ_type", "").strip()
+            if _nval and _nval not in st.session_state["occupation_types"]:
+                st.session_state["occupation_types"].append(_nval)
+                st.rerun()
+    st.checkbox(
+        "Optimize by occupation",
+        key="occ_optimize",
+        help="Penalises mixed-occupation routes. Shuttles still fill spare seats "
+             "with other roles when needed (no extra vehicle is added just to separate).",
+    )
+
+    st.divider()
+
     # Optimize button
     _can_optimize = bool(st.session_state["stops"]) and bool(st.session_state["destination"])
     if st.button("🔍 Optimise Routes", use_container_width=True,
                  type="primary", disabled=not _can_optimize):
-        _run_optimization(int(num_vehicles), int(vehicle_capacity), float(max_distance_km))
+        _run_optimization(int(num_vehicles), int(vehicle_capacity), float(max_distance_km),
+                          bool(st.session_state.get("occ_optimize", False)))
 
     if not _can_optimize:
         if not st.session_state["destination"]:
@@ -435,11 +496,23 @@ if pc:
                     st.rerun()
     else:
         st.info(f"📍 New stop at ({lat_str}, {lng_str})")
+        _occ_types = st.session_state["occupation_types"]
         with st.form("stop_form"):
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                stop_name = st.text_input("Stop name *", placeholder="Bus Stop A")
-            with col2:
+            stop_name = st.text_input("Stop name *", placeholder="Bus Stop A")
+            if _occ_types:
+                st.markdown("**Occupation breakdown** — leave all zero to enter a total instead")
+                _col_count = min(len(_occ_types), 4)
+                _occ_cols = st.columns(_col_count)
+                _occ_vals: dict[str, int] = {}
+                for _oi, _ot in enumerate(_occ_types):
+                    with _occ_cols[_oi % _col_count]:
+                        _occ_vals[_ot] = st.number_input(_ot, min_value=0, value=0, step=1,
+                                                         key=f"new_stop_occ_{_ot}")
+                stop_pax = st.number_input(
+                    "Total passengers (used only if all above are zero)",
+                    min_value=1, value=1, step=1, key="new_stop_pax_fallback")
+            else:
+                _occ_vals = {}
                 stop_pax = st.number_input("Passengers *", min_value=1, value=1, step=1)
             c1, c2 = st.columns(2)
             with c1:
@@ -447,13 +520,18 @@ if pc:
                     if not stop_name.strip():
                         st.error("Name is required.")
                     else:
-                        st.session_state["stops"].append({
+                        _occ_total = sum(_occ_vals.values())
+                        passengers = _occ_total if _occ_total > 0 else int(stop_pax)
+                        _new_stop: dict = {
                             "name": stop_name.strip(),
                             "address": f"{lat_str},{lng_str}",
                             "lat": pc["lat"],
                             "lng": pc["lng"],
-                            "passengers": int(stop_pax),
-                        })
+                            "passengers": passengers,
+                        }
+                        if _occ_total > 0:
+                            _new_stop["occupations"] = {k: v for k, v in _occ_vals.items() if v > 0}
+                        st.session_state["stops"].append(_new_stop)
                         # Invalidate previous result when graph changes.
                         st.session_state["result"] = None
                         st.session_state["route_polylines"] = None
@@ -546,6 +624,55 @@ with st.expander(
                     st.session_state["result"] = None
                     st.session_state["route_polylines"] = None
                     st.rerun()
+
+        with st.expander("✏️ Edit stop occupations"):
+            _eocc_types = st.session_state["occupation_types"]
+            if not _eocc_types:
+                st.caption("Define occupation types in the sidebar first.")
+            else:
+                _edit_name = st.selectbox(
+                    "Select stop",
+                    [s["name"] for s in st.session_state["stops"]],
+                    key="edit_occ_sel",
+                )
+                _edit_idx = next(
+                    (i for i, s in enumerate(st.session_state["stops"])
+                     if s["name"] == _edit_name),
+                    None,
+                )
+                if _edit_idx is not None:
+                    _s = st.session_state["stops"][_edit_idx]
+                    _cur_occs = _s.get("occupations", {})
+                    with st.form("edit_occ_form"):
+                        st.caption(f"Current total: **{_s['passengers']}** passengers")
+                        _ec = min(len(_eocc_types), 4)
+                        _ecols = st.columns(_ec)
+                        _new_occ_vals: dict[str, int] = {}
+                        for _oi2, _ot2 in enumerate(_eocc_types):
+                            with _ecols[_oi2 % _ec]:
+                                _new_occ_vals[_ot2] = st.number_input(
+                                    _ot2, min_value=0, step=1,
+                                    value=int(_cur_occs.get(_ot2, 0)),
+                                    key=f"edit_occ_{_ot2}",
+                                )
+                        _pax_fb = st.number_input(
+                            "Total passengers (if no occupation breakdown)",
+                            min_value=1, value=_s["passengers"], step=1,
+                            key="edit_pax_fallback",
+                        )
+                        if st.form_submit_button("💾 Save changes", use_container_width=True):
+                            _occ_sum = sum(_new_occ_vals.values())
+                            if _occ_sum > 0:
+                                st.session_state["stops"][_edit_idx]["occupations"] = {
+                                    k: v for k, v in _new_occ_vals.items() if v > 0
+                                }
+                                st.session_state["stops"][_edit_idx]["passengers"] = _occ_sum
+                            else:
+                                st.session_state["stops"][_edit_idx].pop("occupations", None)
+                                st.session_state["stops"][_edit_idx]["passengers"] = int(_pax_fb)
+                            st.session_state["result"] = None
+                            st.session_state["route_polylines"] = None
+                            st.rerun()
     else:
         st.info("No stops yet. Click the map (Add Stop mode) or upload a CSV.")
 
@@ -572,22 +699,34 @@ if result is not None:
 
     for route in result.routes:
         emoji = "🔴🔵🟢🟠🟣🔵🟤"[route.vehicle_id % 7]
+        # Build occupation summary for this shuttle's route.
+        _route_occs: dict[str, int] = {}
+        for _rn in route.stop_indices:
+            if _rn != 0:
+                for _occ, _cnt in stops_list[_rn - 1].get("occupations", {}).items():
+                    _route_occs[_occ] = _route_occs.get(_occ, 0) + _cnt
+        _occ_summary = ", ".join(f"{k}: {v}" for k, v in sorted(_route_occs.items()))
         with st.expander(
             f"{emoji} Shuttle {route.vehicle_id + 1} — "
             f"{route.total_passengers} pax · "
             f"{route.occupancy_pct}% occupancy · "
             f"{round(route.total_distance_m / 1000, 1)} km"
+            + (f" · {_occ_summary}" if _occ_summary else "")
         ):
             rows = []
             for seq, (node_idx, node_name) in enumerate(
                 zip(route.stop_indices, route.stop_names)
             ):
                 if node_idx == 0:
-                    label, pax = "🏢 Hub (Destination)", "—"
+                    label, pax, occ_str = "🏢 Hub (Destination)", "—", "—"
                 else:
                     s = stops_list[node_idx - 1]
                     label, pax = node_name, s["passengers"]
-                rows.append({"Stop #": seq + 1, "Name": label, "Passengers": pax})
+                    occ_str = ", ".join(
+                        f"{k}×{v}" for k, v in s.get("occupations", {}).items() if v > 0
+                    ) or "—"
+                rows.append({"Stop #": seq + 1, "Name": label, "Passengers": pax,
+                             "Occupations": occ_str})
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
     # Download
