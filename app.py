@@ -90,8 +90,8 @@ def _stops_dataframe() -> pd.DataFrame:
             "#": i + 1,
             "Name": s["name"],
             "Address": s["address"],
-            "Lat": round(s["lat"], 6),
-            "Lng": round(s["lng"], 6),
+            "Lat": round(s["lat"], 6) if s["lat"] is not None else "—",
+            "Lng": round(s["lng"], 6) if s["lng"] is not None else "—",
             "Passengers": s["passengers"],
         }
         for i, s in enumerate(stops)
