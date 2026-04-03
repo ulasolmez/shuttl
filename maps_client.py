@@ -79,6 +79,7 @@ class MapsClient:
                     mode=mode,
                 )
 
+
                 for r_idx, row in enumerate(response["rows"]):
                     for c_idx, element in enumerate(row["elements"]):
                         abs_row = origins_start + r_idx
@@ -92,3 +93,38 @@ class MapsClient:
                             matrix[abs_row][abs_col] = 999_999_999
 
         return matrix
+
+    # ------------------------------------------------------------------
+    # Street-following route polyline (for map visualisation)
+    # ------------------------------------------------------------------
+
+    def get_route_polyline(
+        self,
+        origin: tuple[float, float],
+        destination: tuple[float, float],
+        mode: str = "driving",
+    ) -> list[tuple[float, float]]:
+        """
+        Return the actual street-following route as a list of (lat, lng) points.
+
+        Uses the Directions API overview polyline so the rendered edge on the
+        map follows real roads rather than a straight line.
+        Falls back to a two-point straight segment on any API error.
+        """
+        try:
+            from googlemaps import convert as gm_convert
+
+            result = self._client.directions(
+                origin=f"{origin[0]},{origin[1]}",
+                destination=f"{destination[0]},{destination[1]}",
+                mode=mode,
+            )
+            if not result:
+                return [origin, destination]
+
+            encoded = result[0]["overview_polyline"]["points"]
+            pts = gm_convert.decode_polyline(encoded)
+            return [(float(p["lat"]), float(p["lng"])) for p in pts]
+        except Exception:
+            return [origin, destination]
+
