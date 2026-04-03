@@ -71,8 +71,8 @@ def build_map(
         center = [sum(valid_lats) / len(valid_lats), sum(valid_lngs) / len(valid_lngs)]
         zoom = 12
     else:
-        center = [20.0, 0.0]
-        zoom = 2
+        center = [36.8987, 30.8005]  # Antalya Airport (AYT) default
+        zoom = 11
 
     fmap = folium.Map(location=center, zoom_start=zoom, tiles="OpenStreetMap")
 

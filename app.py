@@ -206,7 +206,7 @@ def _parse_csv(raw: bytes) -> list[dict] | None:
 # Optimisation runner
 # ---------------------------------------------------------------------------
 
-def _run_optimization(num_vehicles: int, vehicle_capacity: int):
+def _run_optimization(num_vehicles: int, vehicle_capacity: int, max_distance_km: float):
     stops = st.session_state["stops"]
     destination = st.session_state["destination"]
 
@@ -255,6 +255,7 @@ def _run_optimization(num_vehicles: int, vehicle_capacity: int):
                 stop_names=stop_names,
                 num_vehicles=num_vehicles,
                 vehicle_capacity=vehicle_capacity,
+                max_route_distance_m=int(max_distance_km * 1000),
             )
             result = solver.solve()
         except ValueError as exc:
@@ -334,6 +335,10 @@ with st.sidebar:
                                    max_value=100, value=3, step=1, key="num_vehicles")
     vehicle_capacity = st.number_input("Seats per shuttle", min_value=1,
                                        max_value=200, value=15, step=1, key="vehicle_capacity")
+    max_distance_km = st.number_input("Max route distance (km)", min_value=1,
+                                      max_value=1000, value=30, step=5,
+                                      key="max_distance_km",
+                                      help="Maximum total driving distance per shuttle route.")
 
     total_pax = sum(s["passengers"] for s in st.session_state["stops"])
     if total_pax > 0:
@@ -347,7 +352,7 @@ with st.sidebar:
     _can_optimize = bool(st.session_state["stops"]) and bool(st.session_state["destination"])
     if st.button("🔍 Optimise Routes", use_container_width=True,
                  type="primary", disabled=not _can_optimize):
-        _run_optimization(int(num_vehicles), int(vehicle_capacity))
+        _run_optimization(int(num_vehicles), int(vehicle_capacity), float(max_distance_km))
 
     if not _can_optimize:
         if not st.session_state["destination"]:

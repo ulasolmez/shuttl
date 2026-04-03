@@ -54,6 +54,8 @@ class ShuttleOptimizer:
     stop_names      : list of N strings corresponding to each node.
     num_vehicles    : maximum number of shuttles available.
     vehicle_capacity: maximum passengers per shuttle.
+    max_route_distance_m : maximum total route length per shuttle in metres.
+                           0 means no limit.
     time_limit_sec  : seconds the solver is allowed to search.
     """
 
@@ -68,6 +70,7 @@ class ShuttleOptimizer:
         stop_names: list[str],
         num_vehicles: int,
         vehicle_capacity: int,
+        max_route_distance_m: int = 0,
         time_limit_sec: int = 30,
     ):
         if len(distance_matrix) != len(demands):
@@ -89,6 +92,7 @@ class ShuttleOptimizer:
         self._stop_names = stop_names
         self._num_vehicles = num_vehicles
         self._vehicle_capacity = vehicle_capacity
+        self._max_route_distance_m = max_route_distance_m
         self._time_limit_sec = time_limit_sec
         self._n = len(distance_matrix)
 
@@ -136,6 +140,24 @@ class ShuttleOptimizer:
         max_arc = max(max(row) for row in self._matrix)
         fixed_cost = max_arc * self._FIXED_VEHICLE_COST_MULTIPLIER
         routing.SetFixedCostOfAllVehicles(fixed_cost)
+
+        # --- Max route distance per vehicle ---
+        if self._max_route_distance_m > 0:
+            # Re-use the real distance callback (not the free-depot one) for
+            # the distance dimension so the limit applies to actual road km.
+            def real_distance_callback(from_index: int, to_index: int) -> int:
+                return self._matrix[
+                    manager.IndexToNode(from_index)][
+                    manager.IndexToNode(to_index)]
+
+            real_transit_idx = routing.RegisterTransitCallback(real_distance_callback)
+            routing.AddDimensionWithVehicleCapacity(
+                real_transit_idx,
+                0,                                              # no slack
+                [self._max_route_distance_m] * self._num_vehicles,
+                True,                                           # fix cumul to zero
+                "Distance",
+            )
 
         # --- Search parameters ---
         search_params = pywrapcp.DefaultRoutingSearchParameters()
