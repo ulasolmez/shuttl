@@ -314,21 +314,6 @@ with st.sidebar:
 
     st.divider()
 
-    # API Key
-    st.subheader("Google Maps API Key")
-    _sk = st.secrets.get("GOOGLE_MAPS_API_KEY", "")
-    _ek = os.getenv("GOOGLE_MAPS_API_KEY", "")
-    if _sk:
-        st.caption("Loaded from Streamlit secrets ✓")
-    elif _ek:
-        st.caption("Loaded from .env ✓")
-    else:
-        st.caption("Enter your key below")
-    st.text_input("API Key", type="password", key="api_key_input",
-                  placeholder="AIza…", label_visibility="collapsed")
-
-    st.divider()
-
     # Fleet
     st.subheader("Fleet Configuration")
     num_vehicles = st.number_input("Shuttles available", min_value=1,
