@@ -137,18 +137,25 @@ class ShuttleOptimizer:
         )
 
         # --- Fixed cost per vehicle used — drives solver to fill shuttles ---
-        max_arc = max(max(row) for row in self._matrix)
+        # Exclude penalty values (999_999_999) from max_arc so the fixed cost
+        # is scaled to real distances only.
+        _PENALTY = 999_999_999
+        real_arcs = [v for row in self._matrix for v in row if v < _PENALTY]
+        max_arc = max(real_arcs) if real_arcs else 1
         fixed_cost = max_arc * self._FIXED_VEHICLE_COST_MULTIPLIER
         routing.SetFixedCostOfAllVehicles(fixed_cost)
 
         # --- Max route distance per vehicle ---
         if self._max_route_distance_m > 0:
-            # Re-use the real distance callback (not the free-depot one) for
-            # the distance dimension so the limit applies to actual road km.
+            # Distance dimension measures real inbound driving distance.
+            # Depot→stop arcs must be zeroed here too — the raw matrix contains
+            # 999_999_999 for hub→stop when the hub is an airport / restricted
+            # exit. Without the zero, the first arc blows past any km cap.
             def real_distance_callback(from_index: int, to_index: int) -> int:
-                return self._matrix[
-                    manager.IndexToNode(from_index)][
-                    manager.IndexToNode(to_index)]
+                from_node = manager.IndexToNode(from_index)
+                if from_node == 0:
+                    return 0
+                return self._matrix[from_node][manager.IndexToNode(to_index)]
 
             real_transit_idx = routing.RegisterTransitCallback(real_distance_callback)
             routing.AddDimensionWithVehicleCapacity(
