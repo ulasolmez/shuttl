@@ -55,8 +55,10 @@ _init_state()
 # ---------------------------------------------------------------------------
 
 def _get_api_key() -> str:
-    """Return API key from sidebar field; fall back to .env."""
+    """Return API key: sidebar field → st.secrets → .env fallback chain."""
     key = st.session_state.get("api_key_input", "").strip()
+    if not key:
+        key = st.secrets.get("GOOGLE_MAPS_API_KEY", "")
     if not key:
         key = os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
     return key
@@ -259,8 +261,14 @@ with st.sidebar:
 
     # API Key
     st.subheader("Google Maps API Key")
-    env_key = os.getenv("GOOGLE_MAPS_API_KEY", "")
-    key_hint = "Loaded from .env ✓" if env_key else "Enter your key below"
+    _secrets_key = st.secrets.get("GOOGLE_MAPS_API_KEY", "")
+    _env_key = os.getenv("GOOGLE_MAPS_API_KEY", "")
+    if _secrets_key:
+        key_hint = "Loaded from Streamlit secrets ✓"
+    elif _env_key:
+        key_hint = "Loaded from .env ✓"
+    else:
+        key_hint = "Enter your key below"
     st.caption(key_hint)
     st.text_input(
         "API Key",
