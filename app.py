@@ -186,7 +186,13 @@ def _parse_csv(raw: bytes) -> list[dict] | None:
 
     stops: list[dict] = []
     for _, row in df.iterrows():
-        pax = int(row[pax_col])
+        # Skip rows where passengers or name is missing/NaN.
+        if pd.isna(row[pax_col]) or pd.isna(row[name_col]):
+            continue
+        try:
+            pax = int(float(row[pax_col]))
+        except (ValueError, TypeError):
+            continue
         if pax <= 0:
             continue
         stop: dict = {"name": str(row[name_col]).strip(), "passengers": pax,
