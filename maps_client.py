@@ -83,17 +83,39 @@ class MapsClient:
                 # Network / API error — don't block the user.
                 return lat, lng, "", True
 
-        # --- Fallback: reverse geocode (no hub set yet) ---
-        try:
-            rg = self._client.reverse_geocode((lat, lng))
-            if rg:
-                loc = rg[0]["geometry"]["location"]
-                addr = rg[0].get("formatted_address", "")
-                return float(loc["lat"]), float(loc["lng"]), addr, True
-        except Exception:
-            pass
+        # --- Fallback: no hub set — test reachability with cardinal offset points ---
+        # Try up to 4 directions (~1 km each).  Any successful route means the
+        # clicked point is near a driveable road; we snap to that road.
+        # All four failing means the point is in open water / inaccessible terrain.
+        _offsets = [(0.009, 0.0), (-0.009, 0.0), (0.0, 0.009), (0.0, -0.009)]
+        for _dlat, _dlng in _offsets:
+            try:
+                result = self._client.directions(
+                    origin=f"{lat},{lng}",
+                    destination=f"{lat + _dlat},{lng + _dlng}",
+                    mode="driving",
+                )
+                if not result:
+                    continue
+                leg = result[0]["legs"][0]
+                steps = leg.get("steps", [])
+                snapped_loc = steps[0]["start_location"] if steps else leg["start_location"]
+                s_lat = float(snapped_loc["lat"])
+                s_lng = float(snapped_loc["lng"])
+                # Reverse-geocode the snapped point for a human-readable address.
+                addr = f"{s_lat:.6f},{s_lng:.6f}"
+                try:
+                    rg = self._client.reverse_geocode((s_lat, s_lng))
+                    if rg:
+                        addr = rg[0].get("formatted_address", addr)
+                except Exception:
+                    pass
+                return s_lat, s_lng, addr, True
+            except Exception:
+                continue
 
-        return lat, lng, "", True
+        # All offsets failed — the location has no driveable road access.
+        return lat, lng, "", False
 
     # ------------------------------------------------------------------
     # Distance matrix
